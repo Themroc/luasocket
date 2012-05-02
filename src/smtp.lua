@@ -17,6 +17,7 @@ local socket = require("socket")
 local tp = require("socket.tp")
 local ltn12 = require("ltn12")
 local mime = require("mime")
+local ssl_ok, ssl = pcall(require, "ssl")
 module("socket.smtp")
 
 -----------------------------------------------------------------------------
@@ -46,12 +47,12 @@ function metat.__index:greet(domain)
 end
 
 function metat.__index:mail(from)
-    self.try(self.tp:command("MAIL", "FROM:" .. from))
+    self.try(self.tp:command("MAIL", "FROM:<" .. from .. ">"))
     return self.try(self.tp:check("2.."))
 end
 
 function metat.__index:rcpt(to)
-    self.try(self.tp:command("RCPT", "TO:" .. to))
+    self.try(self.tp:command("RCPT", "TO:<" .. to .. ">"))
     return self.try(self.tp:check("2.."))
 end
 
@@ -238,12 +239,39 @@ function message(mesgt)
     end
 end
 
+local function switch_to_tls(sock)
+    local ssl_c, ok, e
+
+    sock.try(sock.tp:command("STARTTLS"))
+    ok, e= sock.tp:check("2..")
+    if not ok then
+        return nil, e
+    end
+
+    ssl_c, e= ssl.wrap(sock.tp.c, { mode= "client", protocol= "tlsv1" })
+    if not ssl_c then
+        return nil, e
+    end
+    ok, e= ssl_c:dohandshake()
+    if not ok then
+        return nil, e
+    end
+
+    sock.tp.c= ssl_c
+    return true
+end
+
 ---------------------------------------------------------------------------
 -- High level SMTP API
 -----------------------------------------------------------------------------
 send = socket.protect(function(mailt)
     local s = open(mailt.server, mailt.port, mailt.create)
     local ext = s:greet(mailt.domain)
+    if not mailt.no_tls and ssl_ok and string.find(ext, "STARTTLS") and switch_to_tls(s) then
+        -- unfortunately, greet() starts with tp:check()...
+        s.try(s.tp:command("EHLO", domain or DOMAIN))
+        ext= socket.skip(1, s.try(s.tp:check("2..")))
+    end
     s:auth(mailt.user, mailt.password, ext)
     s:send(mailt)
     s:quit()
